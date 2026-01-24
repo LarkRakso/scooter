@@ -1,6 +1,7 @@
 #include <ESC.h>
 #include <EnableInterrupt.h>
-
+#include <Arduino.h>
+#include <Math.h>
 #define DEBUG
 
 #define SERIAL_PORT_SPEED 57600
@@ -21,7 +22,7 @@ uint16_t rc_values[RC_NUM_CHANNELS];
 uint32_t rc_start[RC_NUM_CHANNELS];
 volatile uint16_t rc_shared[RC_NUM_CHANNELS];
 
-uint8_t armed = 0;
+uint8_t armed = 1500;
 
 class vehicleControl {
 
@@ -41,50 +42,57 @@ class vehicleControl {
   public: uint16_t throttle_max = 0;
   public: int16_t throttle_comp;
   public: throttleStruct throttle;
-  //public: uint16_t throttle_L;
 
-  public: uint16_t throttle_arm = 900;
+  public: uint16_t throttle_arm = 1300;
 
   int16_t calculateSteering(uint16_t steeringStalk) {
     //Calculate wanted steering.
-    return steering_center - steeringStalk;
+    int abs_steering = steering_center - steeringStalk;
+    abs_steering = abs(abs_steering);
+    if (abs_steering < 50)
+    {
+      return 0;
+    }
+    else
+    {
+      return steering_center - steeringStalk;
+    }
   }
 
-  throttleStruct calculateThrottle(uint16_t throttleStalk, int16_t steering) {
+  throttleStruct calculateThrottle(uint16_t throttleStalk, int16_t steering, uint16_t steeringStalk) {
     throttleStruct throttle;
 
     //Calculate wanted output value...
     throttle.R = throttleStalk + steering;
     throttle.L = throttleStalk - steering;
-    throttle_comp = 0;
 
     //...but make sure the output values are not set below min or above max throttle value.
     if (throttle.R > throttle_max) {
-      throttle_comp = throttle.R - throttle_max;
       throttle.R = throttle_max;
-      throttle.L = throttleStalk - steering - throttle_comp;
-    } else if (throttle.L > throttle_max) {
-      throttle_comp = throttle.L - throttle_max;
-      throttle.L = throttle_max;
-      throttle.R = throttleStalk + steering - throttle_comp;
-    } else if (throttle.R < throttle_min) {
-      throttle_comp = throttle_min - throttle.R;
-      throttle.R = throttle_min;
-      throttle.L = throttleStalk - steering + throttle_comp;
-    } else if (throttle.L < throttle_min) {
-      throttle_comp = throttle_min - throttle.L;
-      throttle.L = throttle_min;
-      throttle.R = throttleStalk + steering + throttle_comp;
     }
+    if (throttle.R < throttle_min) {
+      throttle.R = throttle_min;
+    }
+    if (throttle.L > throttle_max) {
+      throttle.L = throttle_max;
+    }
+    if (throttle.L < throttle_min) {
+      throttle.L = throttle_min;  
+    }
+    Serial.print("THROTTLE STALK: "); Serial.print(throttleStalk);
+    Serial.print(" - STEERING CENTER: "); Serial.print(steering_center);
+    Serial.print(" - STEERING STALK: "); Serial.print(steeringStalk);
+    Serial.print(" - STEERING INPUT: "); Serial.print(steering);
+    Serial.print(" - OUTPUT R: "); Serial.print(throttle.R);
+    Serial.print(" - OUTPUT L: "); Serial.println(throttle.L);
     return throttle;
   }
 };
 
 //Declaring objects
-vehicleControl vc;
+vehicleControl* vc = new vehicleControl();
 
 //ESCs
-//uint16_t throttle_arm = 900;
 ESC esc_R(9);
 ESC esc_L(10);
 
@@ -121,8 +129,11 @@ void setup() {
   enableInterrupt(RC_ARMING, calc_ch3, CHANGE);
   enableInterrupt(RC_CH4_INPUT, calc_ch4, CHANGE);
 
-  calibrateStalks(vc);
-  validateCalibrationAndInit(vc);
+  while (!validateCalibrationAndInit(vc)) {
+    Serial.println("CALIBRATING STALKS...");
+    calibrateStalks(vc);
+  }
+  Serial.println("CALIBRATING DONE SUCCESSFULLY...");
 }
 
 void loop() {
@@ -140,39 +151,42 @@ void loop() {
       rc_read_values();
     }
   //When an arming value is read from Ch3 and we are not armed, arm the ESCs
-  } else if (!armed && (getArmingSwitch() > 1500) && (abs(getThrottleStalk() - vc.throttle_min) < 10) && (abs(vc.steering_center - getSteeringStalk()) < 10)) {
+  }
+  else if (!armed && (getArmingSwitch() > 1500) && (abs(getThrottleStalk() - vc->throttle_min) < 30) && (abs(vc->steering_center - getSteeringStalk()) < 30)) {
     esc_R.arm();
     esc_L.arm();
     armed = true;
     Serial.println("ARMED");
 
   //When we are armed: LET's RUN!!!
-  } else if (armed) {
-    vc.steering = vc.calculateSteering(getSteeringStalk());
-    vc.throttle = vc.calculateThrottle(getThrottleStalk(), vc.steering);
+  }
+  else if (armed) {
+    vc->steering = vc->calculateSteering(getSteeringStalk());
+    vc->throttle = vc->calculateThrottle(getThrottleStalk(), vc->steering, getSteeringStalk());
 
     //Output the throttle values to the ESCs..
-    esc_R.speed(vc.throttle.R);
-    esc_L.speed(vc.throttle.L);
-
+    esc_R.speed(vc->throttle.R);
+    esc_L.speed(vc->throttle.L);
+/*    Serial.print("Throttle R: "); Serial.print(vc->throttle.R); Serial.print("\t");
+//    Serial.print("Throttle L: "); Serial.println(vc->throttle.L);
     #if defined(DEBUG)
       Serial.print("CH1:"); Serial.print(getSteeringStalk()); Serial.print("\t");
       Serial.print("CH2:"); Serial.print(getThrottleStalk()); Serial.print("\t");
       Serial.print("CH3:"); Serial.print(getArmingSwitch()); Serial.print("\t");
-      Serial.print("Steering:"); Serial.print(vc.steering); Serial.print("\t");
-      Serial.print("RIGHT:"); Serial.print(vc.throttle.R); Serial.print("\t");
-      Serial.print("LEFT:"); Serial.print(vc.throttle.L); Serial.print("\t");
-      Serial.print("COMP:"); Serial.println(vc.throttle_comp);
+      Serial.print("Steering:"); Serial.print(vc->steering); Serial.print("\t");
+      Serial.print("RIGHT:"); Serial.print(vc->throttle.R); Serial.print("\t");
+      Serial.print("LEFT:"); Serial.print(vc->throttle.L); Serial.print("\t");
+      Serial.print("COMP:"); Serial.println(vc->throttle_comp);
     #endif
-
-    //If we read unvalid values, stop the ESCs
-    if ((vc.throttle.R < (vc.throttle_min - 10)) || (vc.throttle.R > (vc.throttle_max + 10)) || (vc.throttle.L < (vc.throttle_min - 10)) || (vc.throttle.L > (vc.throttle_max + 10))) {
+*/
+    //If we read invalid values, stop the ESCs
+    if ((vc->throttle.R < (vc->throttle_min - 30)) || (vc->throttle.R > (vc->throttle_max + 30)) || (vc->throttle.L < (vc->throttle_min - 30)) || (vc->throttle.L > (vc->throttle_max + 30))) {
       //Stop engines
       esc_R.stop(); 
       esc_L.stop();
       armed = false;
       #if defined(DEBUG)
-        Serial.println("EMEGENCY STOP 1 - UNARMED");      
+        Serial.println("EMERGENCY STOP 1 - UNARMED");      
       #endif
     }
 
@@ -185,76 +199,93 @@ void loop() {
     esc_L.stop();
     armed = false;
     #if defined(DEBUG)
-      Serial.println("EMEGENCY STOP 2 - UNARMED");
+      Serial.println("EMERGENCY STOP 2 - UNARMED");
     #endif
   }
 }
 
-void calibrateStalks(vehicleControl myVc) {
-  uint32_t calibTimer;
+void calibrateStalks(vehicleControl* myVc) {
 
+  myVc->steering_center = 0;
   for (int i = 0; i < 4; i++) {
     rc_read_values();
-    myVc.steering_center = myVc.steering_center + getSteeringStalk();
+    myVc->steering_center = myVc->steering_center + getSteeringStalk();
     delay(200);
   }
   //Average value of the steering center reading
-  myVc.steering_center = myVc.steering_center/4;
-  #if defined(DEBUG)
-    Serial.print("Steering CENTER: ");
-    Serial.println(myVc.steering_center);
-  #endif
+  myVc->steering_center = myVc->steering_center/4;
 
-  //Let the stalk calibration continue for 10000 ms (10 s)
-  calibTimer = millis();
-  while (millis() - calibTimer <= 10000) {
+  while (getArmingSwitch() < 1000)
+  {
     rc_read_values();
-    if (getSteeringStalk() < myVc.steering_min) {
-      myVc.steering_min = getSteeringStalk() - 10;
+    myVc->steering_center = (myVc->steering_center + getSteeringStalk())/2;
+    delay(200);    
+    #if defined(DEBUG)
+      Serial.print("Steering CENTER: ");
+      Serial.println(myVc->steering_center);
+    #endif
+  } 
+
+  //Let calibration conftinue until armingswitch is moved to the arming position
+  while (getArmingSwitch() < 1500)
+  {
+    rc_read_values();
+    if (getSteeringStalk() < myVc->steering_min) {
+      myVc->steering_min = getSteeringStalk() - 10;
       #if defined(DEBUG)
         Serial.print("Steering MIN: ");
-        Serial.println(myVc.steering_min);
+        Serial.println(myVc->steering_min);
       #endif
     }
-    if (getSteeringStalk() > myVc.steering_max) {
-      myVc.steering_max = getSteeringStalk() + 10;      
+    if (getSteeringStalk() > myVc->steering_max) {
+      myVc->steering_max = getSteeringStalk() + 10;      
       #if defined(DEBUG)
         Serial.print("Steering MAX: ");
-        Serial.println(myVc.steering_max);
+        Serial.println(myVc->steering_max);
       #endif
     }
-    if (getThrottleStalk() < myVc.throttle_min) {
-      myVc.throttle_min = getThrottleStalk() - 10;
+    if (getThrottleStalk() < myVc->throttle_min) {
+      myVc->throttle_min = getThrottleStalk() - 10;
       #if defined(DEBUG)
         Serial.print("Throttle MIN: ");
-        Serial.println(myVc.throttle_min);
+        Serial.println(myVc->throttle_min);
       #endif
     }
-    if (getThrottleStalk() > myVc.throttle_max) {
-      myVc.throttle_max = getThrottleStalk() + 10;      
+    if (getThrottleStalk() > myVc->throttle_max) {
+      myVc->throttle_max = getThrottleStalk() + 10;      
       #if defined(DEBUG)
         Serial.print("Throttle MAX: ");
-        Serial.println(myVc.throttle_max);
+        Serial.println(myVc->throttle_max);
       #endif
     }
     delay(200);
   }
 }
 
-bool validateCalibrationAndInit(vehicleControl myVc) {
-    //If the input values are within valid ranges, let's initiate the ESCs
-  if (myVc.throttle_min < 1100 && myVc.throttle_min > 900 && myVc.throttle_max < 2000 && myVc.throttle_max > 1800 &&
-            myVc.steering_min < 1100 && myVc.steering_min > 900 && myVc.steering_max < 2000 && myVc.steering_max > 1800 &&
-            myVc.steering_center > 1400 && myVc.steering_center < 1500) {
-      esc_R.init(myVc.throttle_min, myVc.throttle_max, myVc.throttle_arm);
-      esc_L.init(myVc.throttle_min, myVc.throttle_max, myVc.throttle_arm);
-      return true;  
+bool validateCalibrationAndInit(vehicleControl* myVc) {
+  //If the input values are within valid ranges, let's initiate the ESCs
+  if (myVc->throttle_min < 1100 && myVc->throttle_min > 900 &&
+    myVc->throttle_max < 2020 && myVc->throttle_max > 1800 &&
+    myVc->steering_min < 1100 && myVc->steering_min > 900 &&
+    myVc->steering_max < 2020 && myVc->steering_max > 1800 &&
+    myVc->steering_center > 1400 && myVc->steering_center < 1500) {
+    Serial.println("VALID CALIBRATION VALUES...");
+    //Initialize ESCs with the calibrated values 
+    esc_R.init(myVc->throttle_min, myVc->throttle_max, myVc->throttle_arm);
+    esc_L.init(myVc->throttle_min, myVc->throttle_max, myVc->throttle_arm);
+    return true;  
   }
   //...else send stop commands to the ESCs.
   else {
-     esc_R.stop();
-     esc_L.stop();
-     return false;
+    Serial.println("INVALID CALIBRATION VALUES...");
+    Serial.print("Throttle MIN: "); Serial.println(myVc->throttle_min);
+    Serial.print("Throttle MAX: "); Serial.println(myVc->throttle_max);
+    Serial.print("Steering MIN: "); Serial.println(myVc->steering_min);
+    Serial.print("Steering MAX: "); Serial.println(myVc->steering_max);
+    Serial.print("Steering CENTER: "); Serial.println(myVc->steering_center);
+    esc_R.stop();
+    esc_L.stop();
+    return false;
   }
 }
 
